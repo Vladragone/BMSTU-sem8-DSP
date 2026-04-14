@@ -1,147 +1,161 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
-import numpy as np
-import scipy.ndimage as ndimage
-from PIL import Image
+from tkinter import messagebox, ttk
 
 import matplotlib
-from matplotlib.figure import Figure
+import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from skimage import restoration, color
+from matplotlib.figure import Figure
 
-import warnings
-
-warnings.filterwarnings("ignore")
-matplotlib.use('TkAgg')
+matplotlib.use("TkAgg")
 
 
-class SimpleDeconvApp(tk.Tk):
+def mygaussignal(x):
+    a = 1.0
+    sigma = 1.0
+    return a * np.exp(-(x ** 2) / (sigma ** 2))
+
+
+def mean_filter_value(ux, index):
+    result = 0.0
+    imin = index - 2
+    imax = index + 2
+
+    for j in range(imin, imax + 1):
+        if 0 <= j < len(ux):
+            result += ux[j]
+
+    return result / 5.0
+
+
+def med_filter_value(ux, index):
+    imin = index - 1
+    imax = index + 1
+
+    if imin < 0:
+        return ux[imax]
+
+    if imax >= len(ux):
+        return ux[imin]
+
+    if ux[imax] > ux[imin]:
+        return ux[imin]
+
+    return ux[imax]
+
+
+def run_mean_filter(ux, epsv):
+    filtered = ux.copy()
+    for i in range(len(filtered)):
+        smthm = mean_filter_value(filtered, i)
+        if abs(filtered[i] - smthm) > epsv:
+            filtered[i] = smthm
+    return filtered
+
+
+def run_med_filter(ux, epsv):
+    filtered = ux.copy()
+    uxbase = ux.copy()
+    for i in range(len(filtered)):
+        smthm = med_filter_value(uxbase, i)
+        if abs(filtered[i] - smthm) > epsv:
+            filtered[i] = smthm
+    return filtered
+
+
+class Lab9App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("ЛР 9: Восстановление изображений ('Слепая' деконволюция)")
-        self.geometry("1000x600")
+        self.title("ЛР 9: Нелинейная фильтрация импульсных помех")
+        self.geometry("1300x820")
 
-        self.original_image = None
         self.build_ui()
+        self.run_calculation()
 
     def build_ui(self):
-        # --- Верхняя панель с кнопками ---
-        top_frame = tk.Frame(self, pady=10)
-        top_frame.pack(side=tk.TOP, fill=tk.X)
+        panel = ttk.Frame(self, padding=10)
+        panel.pack(side=tk.LEFT, fill=tk.Y)
 
-        self.btn_load = tk.Button(top_frame, text="1. Загрузить картинку", command=self.load_image, font=("Arial", 12))
-        self.btn_load.pack(side=tk.LEFT, padx=20)
+        self.f_var = self.add_entry(panel, "F:", "3")
+        self.dt_var = self.add_entry(panel, "dt:", "0.05")
+        self.a_var = self.add_entry(panel, "a:", "0.25")
+        self.epsv_var = self.add_entry(panel, "epsv:", "0.05")
 
-        self.btn_restore = tk.Button(top_frame, text="2. Восстановить", command=self.restore_image, font=("Arial", 12),
-                                     state=tk.DISABLED)
-        self.btn_restore.pack(side=tk.LEFT, padx=20)
+        ttk.Button(
+            panel,
+            text="Построить",
+            command=self.run_calculation,
+        ).pack(fill="x", ipady=10, pady=(10, 0))
 
-        self.status_label = tk.Label(top_frame, text="Ожидание загрузки...", font=("Arial", 10, "italic"), fg="gray")
-        self.status_label.pack(side=tk.LEFT, padx=20)
+        plot_frame = ttk.Frame(self, padding=(0, 10, 10, 10))
+        plot_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # --- Область с графиками (До и После) ---
-        self.fig = Figure(figsize=(10, 5), dpi=100)
-        self.ax_orig = self.fig.add_subplot(121)
-        self.ax_restored = self.fig.add_subplot(122)
+        self.figure = Figure(figsize=(10, 8), dpi=100)
+        self.ax_mean = self.figure.add_subplot(211)
+        self.ax_med = self.figure.add_subplot(212)
+        self.figure.subplots_adjust(hspace=0.4)
 
-        self.fig.subplots_adjust(wspace=0.1, left=0.05, right=0.95, top=0.9, bottom=0.05)
-
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        self.clear_axes()
+    def add_entry(self, parent, label_text, default_value):
+        ttk.Label(parent, text=label_text).pack(anchor="w")
+        var = tk.StringVar(value=default_value)
+        ttk.Entry(parent, textvariable=var, width=20).pack(fill="x", pady=(2, 8))
+        return var
 
-    def clear_axes(self):
-        """Очистка осей перед новой отрисовкой"""
-        self.ax_orig.clear()
-        self.ax_restored.clear()
-        self.ax_orig.axis('off')
-        self.ax_restored.axis('off')
-        self.ax_orig.set_title("Source image (Исходное)")
-        self.ax_restored.set_title("Recovered image (Восстановленное)")
-        self.canvas.draw()
-
-    def get_motion_psf(self, length, angle):
-        """
-        Аналог MATLAB fspecial('motion', length, angle).
-        Использует SciPy вместо OpenCV.
-        """
-        # Создаем пустую квадратную матрицу размером length x length
-        psf = np.zeros((length, length), dtype=np.float32)
-
-        # Рисуем горизонтальную линию ровно по центру
-        psf[length // 2, :] = 1.0
-
-        # Поворачиваем матрицу на заданный угол
-        psf = ndimage.rotate(psf, angle, reshape=False, order=1)
-
-        # Убираем возможные отрицательные артефакты после интерполяции при повороте
-        psf[psf < 0] = 0
-
-        # Строго нормализуем (сумма всех элементов должна быть равна 1)
-        return psf / psf.sum()
-
-    def load_image(self):
-        """Загрузка изображения, перевод в ЧБ и нормализация 0..1"""
-        filepath = filedialog.askopenfilename(filetypes=[("Image files", "*.bmp *.png *.jpg *.jpeg")])
-        if not filepath:
-            return
-
+    def run_calculation(self):
         try:
-            # Читаем картинку с помощью PIL
-            img_pil = Image.open(filepath).convert('RGB')
-            # Переводим в numpy массив и градации серого
-            img_gray = color.rgb2gray(np.array(img_pil))
+            f_value = float(self.f_var.get())
+            dt = float(self.dt_var.get())
+            a = float(self.a_var.get())
+            epsv = float(self.epsv_var.get())
 
-            # Эквивалент MATLAB: double(imread(...)) / 255
-            # img_gray от scikit-image уже находится в диапазоне [0.0, 1.0]
-            self.original_image = img_gray
+            if dt <= 0:
+                raise ValueError("dt должен быть больше 0")
 
-            self.clear_axes()
-            self.ax_orig.imshow(self.original_image, cmap='gray')
-            self.ax_orig.set_title("Source image (Исходное)")
+            x = np.arange(-f_value, f_value + dt, dt)
+            yx = mygaussignal(x)
+            ux = mygaussignal(x)
+            uxbase = mygaussignal(x)
+
+            px = a * np.random.rand(7)
+            pos = np.array([25, 35, 40, 54, 67, 75, 95]) - 1
+
+            for i in range(len(pos)):
+                if 0 <= pos[i] < len(ux):
+                    ux[pos[i]] = ux[pos[i]] + px[i]
+                    uxbase[pos[i]] = uxbase[pos[i]] + px[i]
+
+            ux_mean = run_mean_filter(ux.copy(), epsv)
+
+            ux = mygaussignal(x)
+            uxbase = mygaussignal(x)
+            for i in range(len(pos)):
+                if 0 <= pos[i] < len(ux):
+                    ux[pos[i]] = ux[pos[i]] + px[i]
+                    uxbase[pos[i]] = uxbase[pos[i]] + px[i]
+
+            ux_med = run_med_filter(ux.copy(), epsv)
+
+            self.ax_mean.clear()
+            self.ax_mean.set_title("MEAN-функция фильтрации")
+            self.ax_mean.plot(x, yx, label="Исходный гауссовский сигнал")
+            self.ax_mean.plot(x, ux_mean, label="Сглаженный сигнал")
+            self.ax_mean.legend()
+            self.ax_mean.grid(True, alpha=0.3)
+
+            self.ax_med.clear()
+            self.ax_med.set_title("MED-функция фильтрации")
+            self.ax_med.plot(x, yx, label="Исходный гауссовский сигнал")
+            self.ax_med.plot(x, ux_med, label="Сглаженный сигнал")
+            self.ax_med.legend()
+            self.ax_med.grid(True, alpha=0.3)
 
             self.canvas.draw()
-
-            self.btn_restore.config(state=tk.NORMAL)
-            self.status_label.config(text="Картинка загружена. Нажмите 'Восстановить'.", fg="black")
-
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить изображение:\n{e}")
-
-    def restore_image(self):
-        """Процесс восстановления (деконволюции)"""
-        if self.original_image is None:
-            return
-
-        self.status_label.config(text="Выполняется сложный расчет (Ричардсон-Люси)... Подождите.", fg="blue")
-        self.update_idletasks()  # Заставляем интерфейс обновить надпись перед подвисанием
-
-        try:
-            # 1. Генерируем матрицу искажения. Как в вашем скрипте: 55, 205
-            psf_length = 55
-            psf_angle = 205
-            psf = self.get_motion_psf(psf_length, psf_angle)
-
-            # 2. Выполняем деконволюцию (восстановление)
-            # В scikit-image алгоритм Ричардсона-Люси работает так же круто, как deconvblind
-            recovered_img = restoration.richardson_lucy(self.original_image, psf, num_iter=30)
-
-            # 3. Выводим результат
-            self.ax_restored.clear()
-            self.ax_restored.axis('off')
-            # vmin=0, vmax=1 гарантируют, что цвета не "съедут" при нормализации
-            self.ax_restored.imshow(recovered_img, cmap='gray', vmin=0, vmax=1)
-            self.ax_restored.set_title("Recovered image (Восстановленное)")
-
-            self.canvas.draw()
-            self.status_label.config(text="Готово!", fg="green")
-
-        except Exception as e:
-            self.status_label.config(text="Ошибка расчета", fg="red")
-            messagebox.showerror("Ошибка", f"Сбой в алгоритме:\n{e}")
+        except Exception as exc:
+            messagebox.showerror("Ошибка", str(exc))
 
 
 if __name__ == "__main__":
-    app = SimpleDeconvApp()
+    app = Lab9App()
     app.mainloop()
