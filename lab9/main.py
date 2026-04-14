@@ -126,6 +126,7 @@ class Lab9App(tk.Tk):
                     ux[pos[i]] = ux[pos[i]] + px[i]
                     uxbase[pos[i]] = uxbase[pos[i]] + px[i]
 
+            noisy_signal = ux.copy()
             ux_mean = run_mean_filter(ux.copy(), epsv)
 
             ux = mygaussignal(x)
@@ -140,6 +141,7 @@ class Lab9App(tk.Tk):
             self.ax_mean.clear()
             self.ax_mean.set_title("MEAN-функция фильтрации")
             self.ax_mean.plot(x, yx, label="Исходный гауссовский сигнал")
+            self.ax_mean.plot(x, noisy_signal, label="Зашумленный сигнал")
             self.ax_mean.plot(x, ux_mean, label="Сглаженный сигнал")
             self.ax_mean.legend()
             self.ax_mean.grid(True, alpha=0.3)
@@ -147,6 +149,7 @@ class Lab9App(tk.Tk):
             self.ax_med.clear()
             self.ax_med.set_title("MED-функция фильтрации")
             self.ax_med.plot(x, yx, label="Исходный гауссовский сигнал")
+            self.ax_med.plot(x, noisy_signal, label="Зашумленный сигнал")
             self.ax_med.plot(x, ux_med, label="Сглаженный сигнал")
             self.ax_med.legend()
             self.ax_med.grid(True, alpha=0.3)
